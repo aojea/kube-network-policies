@@ -60,6 +60,10 @@ table inet kube-network-policies-dnscache {
 	if err := n.syncRules(); err != nil {
 		t.Fatalf("NewDomainCache.syncRules() error = %v", err)
 	}
+	// a second sync over the existing table must not duplicate the rules
+	if err := n.syncRules(); err != nil {
+		t.Fatalf("NewDomainCache.syncRules() resync error = %v", err)
+	}
 
 	cmd := exec.Command("nft", "list", "table", "inet", tableName)
 	out, err := cmd.CombinedOutput()

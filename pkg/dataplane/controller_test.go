@@ -592,3 +592,198 @@ func testController_Run(t *testing.T) {
 		t.Fatal("timed out waiting for message from TCP server")
 	}
 }
+
+// TestController_ResyncKeepsQueuedPackets holds a packet in the nfqueue while
+// the nftables rules are resynced and checks that it is still delivered once
+// the verdict is emitted. Deleting a base chain unregisters its netfilter hook
+// and the kernel then drops every packet waiting in any nfqueue of the network
+// namespace, so a resync must not recreate the table or its base chains.
+// Regression test for https://github.com/kubernetes-sigs/kube-network-policies/issues/402
+func TestController_ResyncKeepsQueuedPackets(t *testing.T) {
+	if !unpriviledUserns() {
+		t.Skip("Test requires unprivileged user namespaces")
+	}
+	execInUserns(t, testController_ResyncKeepsQueuedPackets, syscall.CLONE_NEWNET)
+}
+
+func testController_ResyncKeepsQueuedPackets(t *testing.T) {
+	if out, err := exec.Command("ip", "link", "set", "lo", "up").CombinedOutput(); err != nil {
+		t.Fatalf("failed to bring lo up: %v: %s", err, out)
+	}
+
+	const (
+		probePort = 54321
+		udpPort   = 12346
+	)
+
+	// The evaluator signals on queued when the UDP packet reaches it and then
+	// blocks until release is closed, so the packet waits in the queue for its
+	// verdict while the test resyncs the rules.
+	queued := make(chan struct{}, 1)
+	release := make(chan struct{})
+	evaluators := []api.PolicyEvaluator{
+		&mockPolicyEvaluator{
+			name:      "test-policy-evaluator",
+			divertAll: true,
+			isReady:   true,
+			evaluateEgress: func(_ context.Context, p *network.Packet, _, _ *api.PodInfo) (api.Verdict, error) {
+				switch p.DstPort {
+				case probePort:
+					return api.VerdictDeny, nil
+				case udpPort:
+					select {
+					case queued <- struct{}{}:
+					default:
+					}
+					<-release
+				}
+				return api.VerdictAccept, nil
+			},
+		},
+	}
+
+	config := Config{
+		QueueID:         201,
+		FailOpen:        false,
+		NFTableName:     "test-controller-resync",
+		skipSkuidBypass: true,
+	}
+	controller := newTestController(config, evaluators)
+	go func() { _ = controller.Run(t.Context()) }()
+	waitForController(t, fmt.Sprintf("127.0.0.1:%d", probePort))
+
+	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: udpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: udpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-queued:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the packet to reach the nfqueue")
+	}
+
+	// The packet is waiting for its verdict. Resync the rules over the existing table.
+	if err := controller.syncNFTablesRules(context.Background()); err != nil {
+		t.Fatalf("syncNFTablesRules() error = %v", err)
+	}
+	close(release)
+
+	buf := make([]byte, 64)
+	if err := server.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.ReadFrom(buf); err != nil {
+		t.Fatalf("the packet queued during the resync was not delivered: %v", err)
+	}
+}
+
+// chainHandles maps the table and each of its chains to their kernel handle as
+// printed by "nft -a". Chain handles are a per table counter, so a recreated
+// table gets the same chain handles again and the table handle is needed too.
+func chainHandles(t *testing.T, table string) map[string]string {
+	t.Helper()
+	out, err := exec.Command("nft", "-a", "list", "table", "inet", table).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft -a list table error = %v, output: %s", err, string(out))
+	}
+	handles := map[string]string{}
+	for _, m := range chainHandleRE.FindAllStringSubmatch(string(out), -1) {
+		handles[m[1]+" "+m[2]] = m[3]
+	}
+	return handles
+}
+
+var chainHandleRE = regexp.MustCompile(`(table inet|chain) (\S+) \{ # handle (\d+)`)
+
+// TestNetworkPolicies_Resync checks that syncing over an existing table keeps
+// its base chains, so their netfilter hooks stay registered, and still ends in
+// the same ruleset as a sync on a clean table when the configuration changes.
+func TestNetworkPolicies_Resync(t *testing.T) {
+	if !unpriviledUserns() {
+		t.Skip("Test requires unprivileged user namespaces")
+	}
+	execInUserns(t, testNetworkPolicies_Resync, syscall.CLONE_NEWNET)
+}
+
+func testNetworkPolicies_Resync(t *testing.T) {
+	config := Config{
+		NetfilterBug1766Fix: true,
+		QueueID:             102,
+		FailOpen:            true,
+		NFTableName:         "test-resync",
+	}
+	if err := config.Defaults(); err != nil {
+		t.Fatalf("Defaults() error = %v", err)
+	}
+	evaluator := &mockPolicyEvaluator{
+		name:    "test-evaluator",
+		ips:     []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("fd00::1")},
+		isReady: true,
+	}
+	c := newTestController(config, []api.PolicyEvaluator{evaluator})
+	ctx := context.Background()
+
+	sync := func() string {
+		t.Helper()
+		if err := c.syncNFTablesRules(ctx); err != nil {
+			t.Fatalf("syncNFTablesRules() error = %v", err)
+		}
+		out, err := exec.Command("nft", "list", "table", "inet", config.NFTableName).CombinedOutput()
+		if err != nil {
+			t.Fatalf("nft list table error = %v, output: %s", err, string(out))
+		}
+		return string(out)
+	}
+
+	sync()
+	before := chainHandles(t, config.NFTableName)
+	if len(before) != 4 {
+		t.Fatalf("expected the table and the postrouting, input and prerouting chains, got %v", before)
+	}
+
+	steps := []struct {
+		name   string
+		change func()
+	}{
+		{name: "same configuration", change: func() {}},
+		{name: "new pod IPs", change: func() {
+			evaluator.ips = []netip.Addr{netip.MustParseAddr("10.0.0.2")}
+		}},
+		{name: "divert all traffic", change: func() { evaluator.divertAll = true }},
+		{name: "pod IPs again", change: func() {
+			evaluator.divertAll = false
+			evaluator.ips = []netip.Addr{netip.MustParseAddr("10.0.0.3"), netip.MustParseAddr("fd00::3")}
+		}},
+	}
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			step.change()
+			got := sync()
+
+			after := chainHandles(t, config.NFTableName)
+			if diff := cmp.Diff(before, after); diff != "" {
+				t.Errorf("base chains were recreated, which unregisters their hooks (-before +after):\n%s", diff)
+			}
+
+			// A sync on a clean table is the reference for this configuration.
+			c.cleanNFTablesRules(ctx)
+			want := sync()
+			if !compareMultilineStringsIgnoreIndentation(got, want) {
+				t.Errorf("resync differs from a clean sync (-resync +clean):\n%s", cmp.Diff(strings.TrimSpace(got), strings.TrimSpace(want)))
+			}
+			before = chainHandles(t, config.NFTableName)
+		})
+	}
+	c.cleanNFTablesRules(ctx)
+}

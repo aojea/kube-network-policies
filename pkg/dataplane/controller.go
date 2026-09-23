@@ -469,34 +469,35 @@ func (c *Controller) syncNFTablesRules(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("can not start nftables:%v", err)
 	}
-	// add + delete + add for flushing all the table
+	// Atomic rule replacement: add the table, flush its rules and load the new
+	// ones in a single transaction. The table and its base chains are kept,
+	// deleting a base chain unregisters its netfilter hook and the kernel drops
+	// every packet waiting in any nfqueue of the network namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
 	table := &nftables.Table{
 		Name:   c.config.NFTableName,
 		Family: nftables.TableFamilyINet,
 	}
-
 	nft.AddTable(table)
-	nft.DelTable(table)
-	nft.AddTable(table)
+	nft.FlushTable(table)
 
 	allPodIPs, divertAll, err := c.policyEngine.GetManagedIPs(ctx)
 	if err != nil {
 		return err
 	}
 
+	// add set with IPs impacted by network policies
+	v4Set := &nftables.Set{
+		Table:   table,
+		Name:    podV4IPsSet,
+		KeyType: nftables.TypeIPAddr,
+	}
+	v6Set := &nftables.Set{
+		Table:   table,
+		Name:    podV6IPsSet,
+		KeyType: nftables.TypeIP6Addr,
+	}
 	if !divertAll {
-		// add set with IPs impacted by network policies
-		v4Set := &nftables.Set{
-			Table:   table,
-			Name:    podV4IPsSet,
-			KeyType: nftables.TypeIPAddr,
-		}
-		v6Set := &nftables.Set{
-			Table:   table,
-			Name:    podV6IPsSet,
-			KeyType: nftables.TypeIP6Addr,
-		}
-
 		var elementsV4, elementsV6 []nftables.SetElement
 		for _, ip := range allPodIPs {
 			if ip.Is4() {
@@ -510,11 +511,20 @@ func (c *Controller) syncNFTablesRules(ctx context.Context) error {
 			}
 		}
 
-		if err := nft.AddSet(v4Set, elementsV4); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
-		}
-		if err := nft.AddSet(v6Set, elementsV6); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
+		// flush table does not flush the sets, replace their elements explicitly
+		for _, set := range []struct {
+			set      *nftables.Set
+			elements []nftables.SetElement
+		}{{v4Set, elementsV4}, {v6Set, elementsV6}} {
+			if err := nft.AddSet(set.set, nil); err != nil {
+				return fmt.Errorf("failed to add Set %s : %v", set.set.Name, err)
+			}
+			nft.FlushSet(set.set)
+			if len(set.elements) > 0 {
+				if err := nft.SetAddElements(set.set, set.elements); err != nil {
+					return fmt.Errorf("failed to add elements to Set %s : %v", set.set.Name, err)
+				}
+			}
 		}
 	}
 
@@ -811,6 +821,18 @@ func (c *Controller) syncNFTablesRules(ctx context.Context) error {
 
 	if c.config.NetfilterBug1766Fix {
 		c.addDNSRacersWorkaroundRules(nft, table, divertAll)
+	}
+
+	if divertAll {
+		// flush table does not delete the sets, and they are unreferenced once
+		// the rules above are flushed. add + delete so the delete succeeds
+		// whether or not the set exists.
+		for _, set := range []*nftables.Set{v4Set, v6Set} {
+			if err := nft.AddSet(set, nil); err != nil {
+				return fmt.Errorf("failed to add Set %s : %v", set.Name, err)
+			}
+			nft.DelSet(set)
+		}
 	}
 
 	if err := nft.Flush(); err != nil {

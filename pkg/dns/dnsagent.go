@@ -143,14 +143,17 @@ func (n *DomainCache) syncRules() error {
 		return fmt.Errorf("fastpath failure, can not start nftables:%v", err)
 	}
 
-	// add + delete + add for flushing all the table
+	// Atomic rule replacement: add the table, flush its rules and load the new
+	// ones in a single transaction. The table and its base chain are kept,
+	// deleting a base chain unregisters its netfilter hook and the kernel drops
+	// every packet waiting in any nfqueue of the network namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
 	table := &nftables.Table{
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
 	nft.AddTable(table)
-	nft.DelTable(table)
-	nft.AddTable(table)
+	nft.FlushTable(table)
 
 	chain := nft.AddChain(&nftables.Chain{
 		Name:     "postrouting",
