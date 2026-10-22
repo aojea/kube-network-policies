@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 
+	"k8s.io/apimachinery/pkg/types"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"sigs.k8s.io/kube-network-policies/pkg/api"
 	"sigs.k8s.io/kube-network-policies/pkg/podinfo"
@@ -23,8 +24,8 @@ func NewNRIResolver(ctx context.Context, nodeName string, namespaceInformer core
 }
 
 // LookupPod always returns false on non-Linux platforms.
-func (p *NRIResolver) LookupPod(ip string) (string, bool) {
-	return "", false
+func (p *NRIResolver) LookupPod(ip string) (string, types.UID, bool) {
+	return "", "", false
 }
 
 // GetPodInfoByIP always returns false on non-Linux platforms.

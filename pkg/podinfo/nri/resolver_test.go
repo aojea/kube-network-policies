@@ -50,7 +50,7 @@ func newTestResolver() *NRIResolver {
 
 func expectLookup(t *testing.T, resolver *NRIResolver, ip, want string) {
 	t.Helper()
-	key, ok := resolver.LookupPod(ip)
+	key, _, ok := resolver.LookupPod(ip)
 	if !ok || key != want {
 		t.Errorf("LookupPod(%s) got %q, %v; want %q, true", ip, key, ok, want)
 	}
@@ -58,7 +58,7 @@ func expectLookup(t *testing.T, resolver *NRIResolver, ip, want string) {
 
 func expectNotFound(t *testing.T, resolver *NRIResolver, ip string) {
 	t.Helper()
-	if key, ok := resolver.LookupPod(ip); ok {
+	if key, _, ok := resolver.LookupPod(ip); ok {
 		t.Errorf("LookupPod(%s) got %q, want not found", ip, key)
 	}
 }
@@ -255,16 +255,15 @@ func TestNRIResolver_Concurrent(t *testing.T) {
 
 func TestNRIResolver_LookupPod(t *testing.T) {
 	resolver := newTestResolver()
-	resolver.podInfoByIP["10.0.0.1"] = &api.PodInfo{Namespace: &api.Namespace{Name: "ns1"}, Name: "pod1"}
+	resolver.podInfoByIP["10.0.0.1"] = &api.PodInfo{Namespace: &api.Namespace{Name: "ns1"}, Name: "pod1", Uid: "uid1"}
 
-	key, ok := resolver.LookupPod("10.0.0.1")
-	if !ok || key != "ns1/pod1" {
-		t.Errorf("LookupPod() got key %q, ok %v; want %q, true", key, ok, "ns1/pod1")
+	key, uid, ok := resolver.LookupPod("10.0.0.1")
+	if !ok || key != "ns1/pod1" || uid != "uid1" {
+		t.Errorf("LookupPod() got %q, %q, %v; want %q, %q, true", key, uid, ok, "ns1/pod1", "uid1")
 	}
 
-	key, ok = resolver.LookupPod("1.2.3.4")
-	if ok || key != "" {
-		t.Errorf("LookupPod() got key %q, ok %v; want %q, false", key, ok, "")
+	if key, _, ok = resolver.LookupPod("1.2.3.4"); ok {
+		t.Errorf("LookupPod() got %q, want not found", key)
 	}
 }
 

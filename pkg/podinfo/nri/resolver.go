@@ -12,6 +12,7 @@ import (
 	"github.com/containerd/nri/pkg/stub"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"k8s.io/apimachinery/pkg/types"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
@@ -102,12 +103,12 @@ func NewNRIResolver(ctx context.Context, nodeName string, namespaceInformer core
 }
 
 // LookupPod implements the Resolver interface using the NRI plugin.
-func (p *NRIResolver) LookupPod(ip string) (string, bool) {
+func (p *NRIResolver) LookupPod(ip string) (string, types.UID, bool) {
 	podInfo, found := p.GetPodInfoByIP(ip)
 	if !found {
-		return "", false
+		return "", "", false
 	}
-	return podInfo.Namespace.Name + "/" + podInfo.Name, true
+	return podInfo.Namespace.Name + "/" + podInfo.Name, types.UID(podInfo.Uid), true
 }
 
 func (p *NRIResolver) Run(ctx context.Context) error {
@@ -247,6 +248,7 @@ func (p *NRIResolver) getPodInfo(pod *nriapi.PodSandbox) *api.PodInfo {
 			Name: p.nodeName,
 		},
 		LastUpdated: time.Now().Unix(),
+		Uid:         pod.GetUid(),
 	}
 	if p.nsLister != nil {
 		ns, err := p.nsLister.Get(pod.GetNamespace())

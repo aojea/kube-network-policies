@@ -167,7 +167,7 @@ func TestInformerResolver_LookupPod(t *testing.T) {
 				informer.GetIndexer().Add(pod)
 			}
 
-			key, ok := resolver.LookupPod(tt.lookupIP)
+			key, _, ok := resolver.LookupPod(tt.lookupIP)
 			if ok != tt.expectedOk {
 				t.Errorf("LookupPod() ok = %v, want %v", ok, tt.expectedOk)
 			}

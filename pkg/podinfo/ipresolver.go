@@ -5,14 +5,29 @@ import (
 	"slices"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/kube-network-policies/pkg/api"
 )
 
-// IPResolver defines an interface for resolving an IP address to a pod's key ("namespace/name").
+// IPResolver defines an interface for resolving an IP address to the pod that owns it.
 type IPResolver interface {
-	// LookupPod abstracts the logic of finding a pod's key given its IP.
-	// It returns the key and true if found, otherwise an empty string and false.
-	LookupPod(ip string) (string, bool)
+	// LookupPod abstracts the logic of finding the pod that owns an IP.
+	// It returns the pod key ("namespace/name"), its UID and true if found,
+	// otherwise false. The UID tells the pod apart from an older pod with
+	// the same name.
+	LookupPod(ip string) (string, types.UID, bool)
+}
+
+// LocalResolver resolves the IPs of the pods on the node from the container
+// runtime. The runtime assigns the IP when it creates the sandbox and
+// releases it when it stops it, the apiserver shows it later and keeps it
+// longer, so the local resolver decides which local pod owns an IP. It also
+// knows the pod labels, so it provides the pod details when the apiserver
+// does not have the pod yet.
+type LocalResolver interface {
+	IPResolver
+	api.PodInfoProvider
 }
 
 // --- Informer-based Resolver ---
@@ -60,10 +75,10 @@ func isTerminalPod(pod *v1.Pod) bool {
 }
 
 // LookupPod implements the Resolver interface using the informer's index.
-func (r *InformerResolver) LookupPod(ip string) (string, bool) {
+func (r *InformerResolver) LookupPod(ip string) (string, types.UID, bool) {
 	objs, err := r.podIndexer.ByIndex(PodIPIndex, ip)
 	if err != nil || len(objs) == 0 {
-		return "", false
+		return "", "", false
 	}
 	pods := make([]*v1.Pod, 0, len(objs))
 	for _, obj := range objs {
@@ -72,7 +87,7 @@ func (r *InformerResolver) LookupPod(ip string) (string, bool) {
 		}
 	}
 	if len(pods) == 0 {
-		return "", false
+		return "", "", false
 	}
 	// If multiple pods share the IP prefer the one that is not being deleted,
 	// then the Running one. A pod being deleted still reports Running with its
@@ -82,9 +97,9 @@ func (r *InformerResolver) LookupPod(ip string) (string, bool) {
 	})
 	key, err := cache.MetaNamespaceKeyFunc(best)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
-	return key, true
+	return key, best.UID, true
 }
 
 // ownershipRank scores how likely a pod is to own the IPs in its status.
