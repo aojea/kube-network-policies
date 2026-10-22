@@ -57,3 +57,12 @@ func NewPodInfo(pod *v1.Pod, nsLabels map[string]string, nodeLabels map[string]s
 		Uid:         string(PodUID(pod)),
 	}
 }
+
+// SamePod returns true if both records belong to the same Pod. Records
+// written before the UID existed are compared by namespace and name.
+func SamePod(a, b *PodInfo) bool {
+	if a.GetUid() != "" && b.GetUid() != "" {
+		return a.GetUid() == b.GetUid()
+	}
+	return a.GetNamespace().GetName() == b.GetNamespace().GetName() && a.GetName() == b.GetName()
+}
