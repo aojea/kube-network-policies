@@ -5,7 +5,6 @@ import (
 	"net/netip"
 
 	networkingv1 "k8s.io/api/networking/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	networkinginformers "k8s.io/client-go/informers/networking/v1"
 	networkinglisters "k8s.io/client-go/listers/networking/v1"
@@ -76,11 +75,9 @@ func (s *IPTrackerNetworkPolicy) ManagedIPs(ctx context.Context) ([]netip.Addr, 
 
 // EvaluateIngress evaluates the ingress traffic for a pod.
 func (s *IPTrackerNetworkPolicy) EvaluateIngress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies := s.getNetworkPoliciesForPod(dstPod)
 	if len(policies) == 0 {
-		logger.V(2).Info("Ingress NetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Ingress NetworkPolicies does not apply")
 		return api.VerdictNext, nil
 	}
 	if !networkpolicy.EvaluatePolicyDirection(ctx, policies, networkingv1.PolicyTypeIngress, dstPod, p.DstPort, srcPod, p.SrcIP, p.SrcPort, p.Proto) {
@@ -91,11 +88,9 @@ func (s *IPTrackerNetworkPolicy) EvaluateIngress(ctx context.Context, p *network
 
 // EvaluateEgress evaluates the egress traffic for a pod.
 func (s *IPTrackerNetworkPolicy) EvaluateEgress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies := s.getNetworkPoliciesForPod(srcPod)
 	if len(policies) == 0 {
-		logger.V(2).Info("Ingress NetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Egress NetworkPolicies does not apply")
 		return api.VerdictNext, nil
 	}
 
@@ -127,11 +122,7 @@ func (s *IPTrackerNetworkPolicy) getNetworkPoliciesForPod(pod *api.PodInfo) []*n
 	}
 	var result []*networkingv1.NetworkPolicy
 	for _, policy := range networkPolices {
-		podSelector, err := metav1.LabelSelectorAsSelector(&policy.Spec.PodSelector)
-		if err != nil {
-			continue
-		}
-		if podSelector.Matches(labels.Set(pod.Labels)) {
+		if networkpolicy.MatchesSelector(&policy.Spec.PodSelector, pod.Labels) {
 			result = append(result, policy)
 		}
 	}

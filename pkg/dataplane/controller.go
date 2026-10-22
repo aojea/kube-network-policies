@@ -262,7 +262,9 @@ func (c *Controller) Run(ctx context.Context) error {
 		}
 
 		startTime := time.Now()
-		logger.V(2).Info("Processing sync for packet", "id", *a.PacketID)
+		if loggerV4 := logger.V(4); loggerV4.Enabled() {
+			loggerV4.Info("Processing sync for packet", "id", *a.PacketID)
+		}
 
 		packet, err := network.ParsePacket(*a.Payload)
 		if err != nil {
@@ -273,12 +275,15 @@ func (c *Controller) Run(ctx context.Context) error {
 		packet.ID = *a.PacketID
 
 		defer func() {
-			processingTime := float64(time.Since(startTime).Microseconds())
+			duration := time.Since(startTime)
+			processingTime := float64(duration.Microseconds())
 			packetProcessingHist.WithLabelValues(string(packet.Proto), string(packet.Family)).Observe(processingTime)
 			packetProcessingSum.Observe(processingTime)
 			verdictStr := verdictString(verdict)
 			packetCounterVec.WithLabelValues(string(packet.Proto), string(packet.Family), verdictStr).Inc()
-			logger.V(2).Info("Finished syncing packet", "id", *a.PacketID, "duration", time.Since(startTime), "verdict", verdictStr)
+			if loggerV4 := logger.V(4); loggerV4.Enabled() {
+				loggerV4.Info("Finished syncing packet", "id", *a.PacketID, "duration", duration, "verdict", verdictStr)
+			}
 		}()
 
 		verdictOptions := []nfqueue.VerdictOption{}
@@ -434,7 +439,9 @@ func (c *Controller) firewallEnforcer(ctx context.Context) error {
 		if packet == nil {
 			continue
 		}
-		logger.V(4).Info("Evaluating packet", "packet", packet.String())
+		if loggerV4 := logger.V(4); loggerV4.Enabled() {
+			loggerV4.Info("Evaluating packet", "packet", packet)
+		}
 
 		// Evaluate the packet against current network policies.
 		allowed, err := c.policyEngine.EvaluatePacket(ctx, packet)
@@ -444,7 +451,9 @@ func (c *Controller) firewallEnforcer(ctx context.Context) error {
 		}
 
 		if !allowed {
-			logger.V(4).Info("Connection no longer allowed by network policies", "packet", packet.String())
+			if loggerV4 := logger.V(4); loggerV4.Enabled() {
+				loggerV4.Info("Connection no longer allowed by network policies", "packet", packet)
+			}
 			// clear label so it can be re-evaluated in the queue
 			flow.Labels = clearLabelBit(flow.Labels, c.config.CTLabelAccept)
 			err = netlink.ConntrackUpdate(netlink.ConntrackTable, netlink.InetFamily(flow.FamilyType), flow)

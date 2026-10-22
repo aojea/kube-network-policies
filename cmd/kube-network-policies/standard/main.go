@@ -154,11 +154,6 @@ func run() int {
 	// by the order in the array.
 	evaluators := []api.PolicyEvaluator{}
 
-	// Logging evaluator must go first if enabled.
-	if klog.V(2).Enabled() {
-		evaluators = append(evaluators, networkpolicy.NewLoggingPolicy())
-	}
-
 	// Standard Network Policy goes after AdminNetworkPolicy and before BaselineAdminNetworkPolicy
 	evaluators = append(evaluators, networkpolicy.NewStandardNetworkPolicy(
 		nodeName,

@@ -39,8 +39,10 @@ func NewPolicyEngine(podInfoProvider api.PodInfoProvider, evaluators []api.Polic
 
 // EvaluatePacket runs the full ingress and egress evaluation pipelines.
 func (e *PolicyEngine) EvaluatePacket(ctx context.Context, packet *network.Packet) (bool, error) {
-	logger := klog.FromContext(ctx).WithValues("id", packet.ID)
-	ctx = klog.NewContext(ctx, logger)
+	logger := klog.FromContext(ctx)
+	if logger.V(4).Enabled() {
+		ctx = klog.NewContext(ctx, logger.WithValues("id", packet.ID))
+	}
 
 	// Only run podInfoProvider once per packet to guarantee consistency
 	// across the pipeline and for efficiency.
@@ -48,59 +50,91 @@ func (e *PolicyEngine) EvaluatePacket(ctx context.Context, packet *network.Packe
 	dstPod, _ := e.podInfoProvider.GetPodInfoByIP(packet.DstIP.String())
 
 	// 1. Evaluate Egress
-	verdict, err := e.runEgressPipeline(ctx, packet, srcPod, dstPod)
+	verdict, evaluator, err := e.runEgressPipeline(ctx, packet, srcPod, dstPod)
 	if err != nil {
-		logger.Error(err, "Egress pipeline evaluation failed")
+		logger.Error(err, "Egress pipeline evaluation failed", "id", packet.ID, "evaluator", evaluator)
 		return false, err
 	}
 	if verdict == api.VerdictDeny {
-		logger.V(2).Info("Packet denied by egress policy")
+		if loggerV2 := logger.V(2); loggerV2.Enabled() {
+			loggerV2.Info("Packet denied by egress policy",
+				"id", packet.ID,
+				"direction", "Egress",
+				"evaluator", evaluator,
+				"srcPod", podName(srcPod),
+				"dstPod", podName(dstPod),
+				"packet", packet,
+			)
+		}
 		return false, nil
 	}
 
 	// 2. Evaluate Ingress
-	verdict, err = e.runIngressPipeline(ctx, packet, srcPod, dstPod)
+	verdict, evaluator, err = e.runIngressPipeline(ctx, packet, srcPod, dstPod)
 	if err != nil {
-		logger.Error(err, "Ingress pipeline evaluation failed")
+		logger.Error(err, "Ingress pipeline evaluation failed", "id", packet.ID, "evaluator", evaluator)
 		return false, err
 	}
 	if verdict == api.VerdictDeny {
-		logger.V(2).Info("Packet denied by ingress policy")
+		if loggerV2 := logger.V(2); loggerV2.Enabled() {
+			loggerV2.Info("Packet denied by ingress policy",
+				"id", packet.ID,
+				"direction", "Ingress",
+				"evaluator", evaluator,
+				"srcPod", podName(srcPod),
+				"dstPod", podName(dstPod),
+				"packet", packet,
+			)
+		}
 		return false, nil
 	}
 
-	logger.V(2).Info("Packet accepted by policy")
+	if loggerV4 := logger.V(4); loggerV4.Enabled() {
+		loggerV4.Info("Packet accepted by policy",
+			"id", packet.ID,
+			"srcPod", podName(srcPod),
+			"dstPod", podName(dstPod),
+			"packet", packet,
+		)
+	}
 	return true, nil
 }
 
+func podName(pod *api.PodInfo) string {
+	if pod == nil {
+		return "external"
+	}
+	return pod.Namespace.Name + "/" + pod.Name
+}
+
 // runEgressPipeline executes the sequence of egress evaluators.
-func (e *PolicyEngine) runEgressPipeline(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
+func (e *PolicyEngine) runEgressPipeline(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, string, error) {
 	for _, evaluator := range e.evaluators {
 		verdict, err := evaluator.EvaluateEgress(ctx, p, srcPod, dstPod)
 		if err != nil {
-			return api.VerdictDeny, err
+			return api.VerdictDeny, evaluator.Name(), err
 		}
 		// Accept or Deny are final verdicts
 		if verdict != api.VerdictNext {
-			return verdict, nil
+			return verdict, evaluator.Name(), nil
 		}
 	}
-	return api.VerdictAccept, nil
+	return api.VerdictAccept, "", nil
 }
 
 // runIngressPipeline executes the sequence of ingress evaluators.
-func (e *PolicyEngine) runIngressPipeline(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
+func (e *PolicyEngine) runIngressPipeline(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, string, error) {
 	for _, evaluator := range e.evaluators {
 		verdict, err := evaluator.EvaluateIngress(ctx, p, srcPod, dstPod)
 		if err != nil {
-			return api.VerdictDeny, err
+			return api.VerdictDeny, evaluator.Name(), err
 		}
 		// Accept or Deny are final verdicts
 		if verdict != api.VerdictNext {
-			return verdict, nil
+			return verdict, evaluator.Name(), nil
 		}
 	}
-	return api.VerdictAccept, nil
+	return api.VerdictAccept, "", nil
 }
 
 // SetDataplaneSyncCallbacks iterates through all evaluators and registers the

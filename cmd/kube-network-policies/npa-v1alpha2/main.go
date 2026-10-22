@@ -168,11 +168,6 @@ func run() int {
 	// by the order in the array.
 	evaluators := []api.PolicyEvaluator{}
 
-	// Logging evaluator must go first if enabled.
-	if klog.V(2).Enabled() {
-		evaluators = append(evaluators, networkpolicy.NewLoggingPolicy())
-	}
-
 	// Admin Network Policy need to associate IP addresses to Domains
 	// NewDomainCache implements the interface DomainResolver using
 	// nftables to create a cache with the resolved IP addresses from the

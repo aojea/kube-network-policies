@@ -13,9 +13,13 @@ import (
 
 // LoggingPolicy implements the PolicyEvaluator interface to log packet details.
 // It is intended to be the first evaluator in the engine to provide visibility.
+//
+// Deprecated: PolicyEngine now logs packet details directly when emitting verdicts.
 type LoggingPolicy struct{}
 
 // NewLoggingPolicy creates a new logging policy evaluator.
+//
+// Deprecated: PolicyEngine now logs packet details directly when emitting verdicts.
 func NewLoggingPolicy() *LoggingPolicy {
 	return &LoggingPolicy{}
 }
@@ -54,20 +58,15 @@ func (l *LoggingPolicy) EvaluateEgress(ctx context.Context, p *network.Packet, s
 
 // logPacket is a helper function to format and write the log message.
 func logPacket(ctx context.Context, direction string, p *network.Packet, srcPod, dstPod *api.PodInfo) {
-	logger := klog.FromContext(ctx)
-
-	srcPodStr, dstPodStr := "external", "external"
-	if srcPod != nil {
-		srcPodStr = srcPod.Namespace.Name + "/" + srcPod.Name
-	}
-	if dstPod != nil {
-		dstPodStr = dstPod.Namespace.Name + "/" + dstPod.Name
+	loggerV4 := klog.FromContext(ctx).V(4)
+	if !loggerV4.Enabled() {
+		return
 	}
 
-	logger.Info("Evaluating packet",
+	loggerV4.Info("Evaluating packet",
 		"direction", direction,
-		"srcPod", srcPodStr,
-		"dstPod", dstPodStr,
+		"srcPod", podName(srcPod),
+		"dstPod", podName(dstPod),
 		"packet", p,
 	)
 }

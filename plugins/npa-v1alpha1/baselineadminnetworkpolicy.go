@@ -53,8 +53,6 @@ func (b *BaselineAdminNetworkPolicy) ManagedIPs(ctx context.Context) ([]netip.Ad
 }
 
 func (b *BaselineAdminNetworkPolicy) EvaluateIngress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	allPolicies, err := b.banpLister.List(labels.Everything())
 	if err != nil || len(allPolicies) == 0 {
 		return api.VerdictNext, err
@@ -62,11 +60,13 @@ func (b *BaselineAdminNetworkPolicy) EvaluateIngress(ctx context.Context, p *net
 
 	dstPodBaselineAdminNetworkPolices := getBaselineAdminNetworkPoliciesForPod(dstPod, allPolicies)
 	if len(dstPodBaselineAdminNetworkPolices) == 0 {
-		logger.V(2).Info("Ingress BaselineAdminNetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Ingress BaselineAdminNetworkPolicies does not apply")
 		return api.VerdictNext, nil
 	}
 	ingressAction := b.evaluateBaselineAdminIngress(dstPodBaselineAdminNetworkPolices, srcPod, dstPod, p.DstPort, p.Proto)
-	logger.V(2).Info("Ingress BaselineAdminNetworkPolicies", "npolicies", len(dstPodBaselineAdminNetworkPolices), "action", ingressAction)
+	if loggerV4 := klog.FromContext(ctx).V(4); loggerV4.Enabled() {
+		loggerV4.Info("Ingress BaselineAdminNetworkPolicies", "npolicies", len(dstPodBaselineAdminNetworkPolices), "action", ingressAction)
+	}
 
 	switch ingressAction {
 	case npav1alpha1.BaselineAdminNetworkPolicyRuleActionAllow:
@@ -79,17 +79,17 @@ func (b *BaselineAdminNetworkPolicy) EvaluateIngress(ctx context.Context, p *net
 }
 
 func (b *BaselineAdminNetworkPolicy) EvaluateEgress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	allPolicies, err := b.banpLister.List(labels.Everything())
 	if err != nil || len(allPolicies) == 0 {
-		logger.V(2).Info("Egress BaselineAdminNetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Egress BaselineAdminNetworkPolicies does not apply")
 		return api.VerdictNext, err
 	}
 
 	srcPodBaselineAdminNetworkPolices := getBaselineAdminNetworkPoliciesForPod(srcPod, allPolicies)
 	egressAction := b.evaluateBaselineAdminEgress(srcPodBaselineAdminNetworkPolices, dstPod, p.DstIP, p.DstPort, p.Proto)
-	logger.V(2).Info("Egress BaselineAdminNetworkPolicies", "npolicies", len(srcPodBaselineAdminNetworkPolices), "action", egressAction)
+	if loggerV4 := klog.FromContext(ctx).V(4); loggerV4.Enabled() {
+		loggerV4.Info("Egress BaselineAdminNetworkPolicies", "npolicies", len(srcPodBaselineAdminNetworkPolices), "action", egressAction)
+	}
 
 	switch egressAction {
 	case npav1alpha1.BaselineAdminNetworkPolicyRuleActionAllow:
@@ -230,6 +230,17 @@ func (b *BaselineAdminNetworkPolicy) evaluateBaselineAdminIngress(adminNetworkPo
 
 // matchesSelector returns true if the selector matches the given labels.
 func matchesSelector(selector *metav1.LabelSelector, lbls map[string]string) bool {
+	if selector == nil {
+		return false
+	}
+	for k, v := range selector.MatchLabels {
+		if lblVal, ok := lbls[k]; !ok || lblVal != v {
+			return false
+		}
+	}
+	if len(selector.MatchExpressions) == 0 {
+		return true
+	}
 	s, err := metav1.LabelSelectorAsSelector(selector)
 	if err != nil {
 		klog.Errorf("error parsing label selector: %v", err)

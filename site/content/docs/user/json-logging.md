@@ -3,7 +3,7 @@ title: "Troubleshooting with JSON Logging"
 weight: 1
 ---
 
-The controller supports structured JSON logging via klog's `--logging-format=json` flag. When combined with `-v=2`, it produces machine-readable log entries for every packet evaluated against network policies, making it straightforward to filter and analyze traffic decisions with tools like [`jq`](https://jqlang.github.io/jq/).
+The controller supports structured JSON logging via klog's `--logging-format=json` flag. When combined with `-v=2`, it produces machine-readable log entries for packets denied by network policies, making it straightforward to filter and analyze traffic decisions with tools like [`jq`](https://jqlang.github.io/jq/).
 
 ## Enabling JSON logging
 
@@ -13,25 +13,45 @@ Pass the following flags to the controller binary (or set them in the DaemonSet 
 --logging-format=json -v=2
 ```
 
-At `-v=2`, two things happen:
-- The `LoggingPolicy` evaluator is activated and emits one log entry per packet with its 5-tuple and the source/destination pod names.
-- The policy engine emits a verdict entry for each packet indicating whether it was accepted or denied.
+Verbosity levels control packet-level logging:
+- At `-v=2` (recommended for production troubleshooting), the policy engine emits one self-contained log entry per **denied** packet with the packet 5-tuple, source and destination pods, traffic direction, and the policy evaluator that denied the packet. Accepted packets are not logged at `-v=2`.
+- At `-v=4` (for deep debugging), the policy engine also logs accepted packets and per-evaluator / per-rule evaluation traces.
+- Below `-v=2` (e.g., `-v=0`), packet-level verdict logs are not produced.
 
-Without `-v=2`, the `LoggingPolicy` evaluator is not added to the pipeline and packet-level logs are not produced.
+### Fine-grained logging with `-vmodule` (text format)
+
+Because packet verdicts are logged in `engine.go` (`V(2)` for denials, `V(4)` for accepted packets) and per-rule traces live in each policy evaluator's file (`networkpolicy.go`, `clusternetworkpolicy.go`, `adminnetworkpolicy.go`, `baselineadminnetworkpolicy.go`) at `V(4)`, you can use klog's `-vmodule` flag in the default `text` log format for selective logging:
+
+- **Log only denied packet verdicts** (keeping all other controller logs at `V(0)`):
+  ```
+  -v=0 -vmodule=engine=2
+  ```
+- **Log both accepted and denied packet verdicts without per-rule trace noise**:
+  ```
+  -v=2 -vmodule=engine=4
+  ```
+- **Log denied verdicts plus per-rule traces for a single evaluator** (e.g., standard `NetworkPolicy` only):
+  ```
+  -v=2 -vmodule=networkpolicy=4
+  ```
+
+> **Note:** Kubernetes `component-base/logs` only supports `-vmodule` with `--logging-format=text` (the default). In addition, `-vmodule` evaluates caller stack frames when checking verbosity thresholds higher than the global `-v` flag, so global `-v=2` is recommended for steady-state production clusters.
 
 ## Log entry structure
 
-### Packet evaluation entry
+### Verdict entry
 
-Emitted once per direction (Egress then Ingress) for each packet:
+Emitted once per denied packet at `-v=2` (and also for accepted packets at `-v=4`) after the pipeline completes:
 
 ```json
 {
-  "ts": 1720777151838.3552,
-  "caller": "networkpolicy/logging.go:67",
-  "msg": "Evaluating packet",
+  "ts": 1720777151838.4001,
+  "caller": "networkpolicy/engine.go:67",
+  "msg": "Packet denied by egress policy",
+  "v": 2,
   "id": 9,
   "direction": "Egress",
+  "evaluator": "StandardNetworkPolicy",
   "srcPod": "default/frontend",
   "dstPod": "default/backend",
   "packet": {
@@ -46,39 +66,24 @@ Emitted once per direction (Egress then Ingress) for each packet:
 }
 ```
 
+Possible `msg` values:
+- `"Packet denied by egress policy"` (emitted at `-v=2`)
+- `"Packet denied by ingress policy"` (emitted at `-v=2`)
+- `"Packet accepted by policy"` (emitted at `-v=4`)
+
 Key fields:
-- `id`: packet ID; links this entry to the corresponding verdict entry
-- `direction`: `"Egress"` or `"Ingress"`
+- `id`: packet ID; links the verdict entry to per-rule trace entries when `-v=4` is enabled
+- `direction`: `"Egress"` or `"Ingress"` (present on denial entries)
+- `evaluator`: policy evaluator that produced the denial (e.g., `"StandardNetworkPolicy"`, `"ClusterNetworkPolicy"`, `"AdminNetworkPolicy"`, `"BaselineAdminNetworkPolicy"`)
 - `srcPod` / `dstPod`: `"namespace/name"`, or `"external"` for traffic outside the cluster
 - `packet`: the 5-tuple without the raw payload (payload is omitted in JSON mode)
-
-### Verdict entry
-
-Emitted once per packet after the pipeline completes:
-
-```json
-{
-  "ts": 1720777151838.4001,
-  "caller": "networkpolicy/engine.go:57",
-  "msg": "Packet denied by egress policy",
-  "v": 2,
-  "id": 9
-}
-```
-
-Possible `msg` values:
-- `"Packet denied by egress policy"`
-- `"Packet denied by ingress policy"`
-- `"Packet accepted by policy"`
-
-The `id` field matches the packet evaluation entries above.
 
 ## Text vs JSON format
 
 In the default text format, packets are logged with a raw hex dump of the payload:
 
 ```
-I0712 09:53:52.257809       1 logging.go:67] "Evaluating packet" id=9 direction="Egress" srcPod="default/frontend" dstPod="default/backend" packet=<
+I0712 09:53:52.257809       1 engine.go:67] "Packet denied by egress policy" id=9 direction="Egress" evaluator="StandardNetworkPolicy" srcPod="default/frontend" dstPod="default/backend" packet=<
         [9] 10.0.1.3:40243 10.0.2.2:8080 TCP
         00000000  00 00 a0 02 fa f0 19 33  00 00 02 04 05 b4 04 02  |.......3........|
         00000010  08 0a c1 d9 c1 bd 00 00  00 00 01 03 03 07        |..............|
@@ -107,22 +112,15 @@ kubectl logs ... | jq -c 'select(.msg | test("Packet denied"))'
 kubectl logs ... | jq -c 'select(.msg == "Packet denied by egress policy")'
 ```
 
-### Show packet details for denied connections
+### Show compact summary for denied connections
 
-Correlate the verdict entry back to its packet evaluation entry using the `id` field. Collect all denied IDs, then filter the packet entries:
+Each denial entry contains the full pod and packet metadata directly:
 
 ```sh
 kubectl logs ... | jq -c '
-  . as $entry |
   select(.msg | test("Packet denied")) |
-  {id: .id, msg: .msg}
+  {id: .id, direction: .direction, evaluator: .evaluator, srcPod: .srcPod, dstPod: .dstPod, dstPort: .packet.DstPort, proto: .packet.Proto}
 '
-```
-
-Then look up the full packet info for a specific ID (e.g. `id=42`):
-
-```sh
-kubectl logs ... | jq -c 'select(.id == 42 and .packet != null)'
 ```
 
 ### Filter packets by destination port

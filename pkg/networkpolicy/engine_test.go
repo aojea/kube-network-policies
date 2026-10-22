@@ -3,10 +3,12 @@
 package networkpolicy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/logs"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/textlogger"
 )
 
 // FuncProvider is a test helper that wraps a function to satisfy the
@@ -425,6 +429,170 @@ func TestSinglePipelineWithRealEvaluators(t *testing.T) {
 
 			if allow != tt.wantAllow {
 				t.Errorf("Final verdict mismatch: got allow=%v, want allow=%v", allow, tt.wantAllow)
+			}
+		})
+	}
+}
+
+func TestPolicyEngine_EvaluatePacket_Logging(t *testing.T) {
+	podA := api.NewPodInfo(makeTestPod("pod-a", "ns-a", map[string]string{"app": "a"}, "10.0.1.10"), nil, nil, "id-a")
+	podB := api.NewPodInfo(makeTestPod("pod-b", "ns-b", map[string]string{"app": "b"}, "10.0.2.20"), nil, nil, "id-b")
+	provider := &FuncProvider{GetFunc: func(podIP string) (*api.PodInfo, bool) {
+		switch podIP {
+		case "10.0.1.10":
+			return podA, true
+		case "10.0.2.20":
+			return podB, true
+		default:
+			return nil, false
+		}
+	}}
+
+	packet := &network.Packet{
+		ID:      77,
+		SrcIP:   net.ParseIP("10.0.1.10"),
+		SrcPort: 45678,
+		DstIP:   net.ParseIP("10.0.2.20"),
+		DstPort: 80,
+		Proto:   v1.ProtocolTCP,
+	}
+
+	egressDenier := &mockPolicyEvaluator{
+		name: "StandardNetworkPolicy",
+		evaluateEgress: func(context.Context, *network.Packet, *api.PodInfo, *api.PodInfo) (api.Verdict, error) {
+			return api.VerdictDeny, nil
+		},
+	}
+	ingressDenier := &mockPolicyEvaluator{
+		name: "ClusterNetworkPolicy",
+		evaluateEgress: func(context.Context, *network.Packet, *api.PodInfo, *api.PodInfo) (api.Verdict, error) {
+			return api.VerdictNext, nil
+		},
+		evaluateIngress: func(context.Context, *network.Packet, *api.PodInfo, *api.PodInfo) (api.Verdict, error) {
+			return api.VerdictDeny, nil
+		},
+	}
+	acceptor := newMockEvaluator("StandardNetworkPolicy", api.VerdictAccept, nil)
+
+	tests := []struct {
+		name           string
+		verbosity      int
+		vmodule        string
+		evaluators     []api.PolicyEvaluator
+		wantAllow      bool
+		wantEmptyLog   bool
+		wantSubstrings []string
+	}{
+		{
+			name:         "V(0) does not log denied packet",
+			verbosity:    0,
+			evaluators:   []api.PolicyEvaluator{egressDenier},
+			wantAllow:    false,
+			wantEmptyLog: true,
+		},
+		{
+			name:         "V(2) does not log accepted packet",
+			verbosity:    2,
+			evaluators:   []api.PolicyEvaluator{acceptor},
+			wantAllow:    true,
+			wantEmptyLog: true,
+		},
+		{
+			name:       "V(2) logs egress denied packet with full context",
+			verbosity:  2,
+			evaluators: []api.PolicyEvaluator{egressDenier},
+			wantAllow:  false,
+			wantSubstrings: []string{
+				"Packet denied by egress policy",
+				"id=77",
+				`direction="Egress"`,
+				`evaluator="StandardNetworkPolicy"`,
+				"ns-a/pod-a",
+				"ns-b/pod-b",
+				"10.0.1.10:45678",
+				"10.0.2.20:80",
+			},
+		},
+		{
+			name:       "V(2) logs ingress denied packet with full context",
+			verbosity:  2,
+			evaluators: []api.PolicyEvaluator{ingressDenier},
+			wantAllow:  false,
+			wantSubstrings: []string{
+				"Packet denied by ingress policy",
+				"id=77",
+				`direction="Ingress"`,
+				`evaluator="ClusterNetworkPolicy"`,
+				"ns-a/pod-a",
+				"ns-b/pod-b",
+				"10.0.1.10:45678",
+				"10.0.2.20:80",
+			},
+		},
+		{
+			name:       "V(4) logs accepted packet with full context",
+			verbosity:  4,
+			evaluators: []api.PolicyEvaluator{acceptor},
+			wantAllow:  true,
+			wantSubstrings: []string{
+				"Packet accepted by policy",
+				"id=77",
+				"ns-a/pod-a",
+				"ns-b/pod-b",
+				"10.0.1.10:45678",
+				"10.0.2.20:80",
+			},
+		},
+		{
+			name:       "V(0) with vmodule=engine=4 logs accepted packet verdict",
+			verbosity:  0,
+			vmodule:    "engine=4",
+			evaluators: []api.PolicyEvaluator{acceptor},
+			wantAllow:  true,
+			wantSubstrings: []string{
+				"Packet accepted by policy",
+				"id=77",
+				"ns-a/pod-a",
+				"ns-b/pod-b",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			cfg := textlogger.NewConfig(
+				textlogger.Verbosity(tt.verbosity),
+				textlogger.Output(&buf),
+			)
+			if tt.vmodule != "" {
+				if err := cfg.VModule().Set(tt.vmodule); err != nil {
+					t.Fatalf("failed to set vmodule %q: %v", tt.vmodule, err)
+				}
+			}
+			logger := textlogger.NewLogger(cfg)
+			ctx := klog.NewContext(context.Background(), logger)
+
+			engine := NewPolicyEngine(provider, tt.evaluators)
+			allow, err := engine.EvaluatePacket(ctx, packet)
+			if err != nil {
+				t.Fatalf("EvaluatePacket() unexpected error: %v", err)
+			}
+			if allow != tt.wantAllow {
+				t.Errorf("EvaluatePacket() allow = %v, want %v", allow, tt.wantAllow)
+			}
+
+			gotLog := buf.String()
+			if tt.wantEmptyLog {
+				if gotLog != "" {
+					t.Errorf("expected no log output at V(%d), got:\n%s", tt.verbosity, gotLog)
+				}
+				return
+			}
+			for _, sub := range tt.wantSubstrings {
+				if !strings.Contains(gotLog, sub) {
+					t.Errorf("expected log output to contain %q, got:\n%s", sub, gotLog)
+				}
 			}
 		})
 	}

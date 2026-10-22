@@ -66,31 +66,33 @@ func (c *ClusterNetworkPolicy) ManagedIPs(ctx context.Context) ([]netip.Addr, bo
 
 // EvaluateIngress evaluates ingress rules for the evaluator's specific tier.
 func (c *ClusterNetworkPolicy) EvaluateIngress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies, err := c.getPoliciesForPod(dstPod)
 	if err != nil || len(policies) == 0 {
 		return api.VerdictNext, err
 	}
 
 	action := c.evaluateClusterIngress(policies, srcPod, dstPod, p.DstPort, p.Proto)
-	logger.V(2).Info("Ingress CNP evaluation", "tier", c.tier, "npolicies", len(policies), "action", action)
+	if loggerV4 := klog.FromContext(ctx).V(4); loggerV4.Enabled() {
+		loggerV4.Info("Ingress CNP evaluation", "tier", c.tier, "npolicies", len(policies), "action", action)
+	}
 
 	return actionToVerdict(action), nil
 }
 
 // EvaluateEgress evaluates egress rules for the evaluator's specific tier.
 func (c *ClusterNetworkPolicy) EvaluateEgress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies, err := c.getPoliciesForPod(srcPod)
 	if err != nil || len(policies) == 0 {
-		logger.V(2).Info("Skipping Egress CNP evaluation", "npolicies", len(policies), "err", err)
+		if loggerV4 := klog.FromContext(ctx).V(4); loggerV4.Enabled() {
+			loggerV4.Info("Skipping Egress CNP evaluation", "npolicies", len(policies), "err", err)
+		}
 		return api.VerdictNext, err
 	}
 
 	action := c.evaluateClusterEgress(policies, dstPod, p.DstIP, p.DstPort, p.Proto)
-	logger.V(2).Info("Egress CNP evaluation", "tier", c.tier, "npolicies", len(policies), "action", action)
+	if loggerV4 := klog.FromContext(ctx).V(4); loggerV4.Enabled() {
+		loggerV4.Info("Egress CNP evaluation", "tier", c.tier, "npolicies", len(policies), "action", action)
+	}
 
 	return actionToVerdict(action), nil
 }

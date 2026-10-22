@@ -183,11 +183,9 @@ func (s *StandardNetworkPolicy) getLocalPodsForNetworkPolicy(networkPolicy *netw
 }
 
 func (s *StandardNetworkPolicy) EvaluateIngress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies := s.getNetworkPoliciesForPod(dstPod)
 	if len(policies) == 0 {
-		logger.V(2).Info("Ingress NetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Ingress NetworkPolicies does not apply")
 		return api.VerdictNext, nil
 	}
 
@@ -198,11 +196,9 @@ func (s *StandardNetworkPolicy) EvaluateIngress(ctx context.Context, p *network.
 }
 
 func (s *StandardNetworkPolicy) EvaluateEgress(ctx context.Context, p *network.Packet, srcPod, dstPod *api.PodInfo) (api.Verdict, error) {
-	logger := klog.FromContext(ctx)
-
 	policies := s.getNetworkPoliciesForPod(srcPod)
 	if len(policies) == 0 {
-		logger.V(2).Info("Egress NetworkPolicies does not apply")
+		klog.FromContext(ctx).V(4).Info("Egress NetworkPolicies does not apply")
 		return api.VerdictNext, nil
 	}
 
@@ -229,13 +225,7 @@ func (s *StandardNetworkPolicy) getNetworkPoliciesForPod(pod *api.PodInfo) []*ne
 		// the ingress rules for each are combined additively.
 		// This field is NOT optional and follows standard label selector semantics.
 		// An empty podSelector matches all pods in this namespace.
-		podSelector, err := metav1.LabelSelectorAsSelector(&policy.Spec.PodSelector)
-		if err != nil {
-			klog.InfoS("parsing PodSelector", "error", err)
-			continue
-		}
-		// networkPolicy does not select the pod try the next network policy
-		if podSelector.Matches(labels.Set(pod.Labels)) {
+		if MatchesSelector(&policy.Spec.PodSelector, pod.Labels) {
 			result = append(result, policy)
 		}
 	}
@@ -248,12 +238,12 @@ func EvaluatePolicyDirection(
 	ctx context.Context, networkPolicies []*networkingv1.NetworkPolicy, networkPolictType networkingv1.PolicyType,
 	srcPod *api.PodInfo, srcPort int, dstPod *api.PodInfo, dstIP net.IP, dstPort int, proto v1.Protocol) bool {
 
-	tlogger := klog.FromContext(ctx).V(2)
-
 	// no network policies implies allow all by default
 	if len(networkPolicies) == 0 {
 		return true
 	}
+
+	tlogger := klog.FromContext(ctx).V(4)
 
 	// no network policies matching the Pod allows all
 	verdict := true
@@ -315,7 +305,7 @@ func EvaluatePolicyDirection(
 }
 
 func evaluateIngress(ctx context.Context, netpolNamespace string, ingressRules []networkingv1.NetworkPolicyIngressRule, srcPod *api.PodInfo, srcPort int, dstPod *api.PodInfo, dstIP net.IP, proto v1.Protocol) bool {
-	tlogger := klog.FromContext(ctx).V(2)
+	tlogger := klog.FromContext(ctx).V(4)
 	if tlogger.Enabled() && srcPod != nil {
 		tlogger = tlogger.WithValues("pod", srcPod.Namespace.Name+"/"+srcPod.Name)
 	}
@@ -380,12 +370,14 @@ func evaluateIngress(ctx context.Context, netpolNamespace string, ingressRules [
 }
 
 func evaluateEgress(ctx context.Context, netpolNamespace string, egressRules []networkingv1.NetworkPolicyEgressRule, srcPod *api.PodInfo, dstPod *api.PodInfo, dstIP net.IP, dstPort int, proto v1.Protocol) bool {
-	tlogger := klog.FromContext(ctx).V(2)
+	tlogger := klog.FromContext(ctx).V(4)
 	if tlogger.Enabled() && srcPod != nil {
 		tlogger = tlogger.WithValues("pod", srcPod.Namespace.Name+"/"+srcPod.Name)
 	}
 	if len(egressRules) == 0 {
-		tlogger.Info("Pod has allowed all egress traffic")
+		if tlogger.Enabled() {
+			tlogger.Info("Pod has allowed all egress traffic")
+		}
 		return true
 	}
 
@@ -446,20 +438,14 @@ func evaluateSelectors(ctx context.Context, peerPodSelector *metav1.LabelSelecto
 	if pod == nil {
 		return false
 	}
-	logger := klog.FromContext(ctx)
 
 	// podSelector is a label selector which selects pods. This field follows standard label
 	// selector semantics; if present but empty, it selects all pods.
 	// If namespaceSelector is also set, then the NetworkPolicyPeer as a whole selects
 	// the pods matching podSelector in the Namespaces selected by NamespaceSelector.
 	if peerPodSelector != nil {
-		podSelector, err := metav1.LabelSelectorAsSelector(peerPodSelector)
-		if err != nil {
-			logger.Error(err, "Accepting packet")
-			return true
-		}
 		// networkPolicy does not selects the pod
-		if !podSelector.Matches(labels.Set(pod.Labels)) {
+		if !matchesPeerSelector(ctx, peerPodSelector, pod.Labels) {
 			return false
 		}
 		// if peerNSSelector selects the pods matching podSelector in the policy's own namespace
@@ -474,25 +460,28 @@ func evaluateSelectors(ctx context.Context, peerPodSelector *metav1.LabelSelecto
 	// the pods matching podSelector in the namespaces selected by namespaceSelector.
 	// Otherwise it selects all pods in the namespaces selected by namespaceSelector.
 	if peerNSSelector != nil {
-		// if present but empty, it selects all namespaces.
-		if len(peerNSSelector.MatchLabels)+len(peerNSSelector.MatchExpressions) == 0 {
-			return true
-		}
-
-		nsSelector, err := metav1.LabelSelectorAsSelector(peerNSSelector)
-		if err != nil {
-			logger.Error(err, "Accepting packet")
-			return true
-		}
-
-		if nsSelector.Matches(labels.Set(pod.Namespace.Labels)) {
-			return true
-		}
-		return false
+		return matchesPeerSelector(ctx, peerNSSelector, pod.Namespace.Labels)
 	}
 	// at least podSelector or nsSelector is guaranteed to be not nil
 	// it should have returned before reaching this point
 	return true
+}
+
+func matchesPeerSelector(ctx context.Context, selector *metav1.LabelSelector, lbls map[string]string) bool {
+	for k, v := range selector.MatchLabels {
+		if lblVal, ok := lbls[k]; !ok || lblVal != v {
+			return false
+		}
+	}
+	if len(selector.MatchExpressions) == 0 {
+		return true
+	}
+	s, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "Accepting packet")
+		return true
+	}
+	return s.Matches(labels.Set(lbls))
 }
 
 func evaluateIPBlocks(ipBlock *networkingv1.IPBlock, ip net.IP) bool {

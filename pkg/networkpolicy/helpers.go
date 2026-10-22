@@ -8,6 +8,17 @@ import (
 
 // MatchesSelector returns true if the selector matches the given labels.
 func MatchesSelector(selector *metav1.LabelSelector, lbls map[string]string) bool {
+	if selector == nil {
+		return false
+	}
+	for k, v := range selector.MatchLabels {
+		if lblVal, ok := lbls[k]; !ok || lblVal != v {
+			return false
+		}
+	}
+	if len(selector.MatchExpressions) == 0 {
+		return true
+	}
 	s, err := metav1.LabelSelectorAsSelector(selector)
 	if err != nil {
 		klog.Errorf("error parsing label selector: %v", err)
