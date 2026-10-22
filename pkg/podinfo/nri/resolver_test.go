@@ -5,6 +5,7 @@ package nri
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"sync"
 	"testing"
@@ -299,4 +300,47 @@ func TestGetPodIPs(t *testing.T) {
 			t.Errorf("getPodIPs() expected empty slice, got %v", ips)
 		}
 	})
+}
+
+func TestNRIResolver_LocalPodIPs(t *testing.T) {
+	ctx := context.Background()
+	resolver := newTestResolver()
+
+	var notified [][]netip.Addr
+	resolver.OnNewPodIPs(func(ips []netip.Addr) { notified = append(notified, ips) })
+
+	pod := makeNRISandbox("sandbox-1", "ns1", "pod1", selfNetns, []string{"10.0.0.1", "fd00::1"})
+	if err := resolver.RunPodSandbox(ctx, pod); err != nil {
+		t.Fatalf("RunPodSandbox() failed: %v", err)
+	}
+	// The IPs are visible to the callback already
+	want := []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("fd00::1")}
+	if len(notified) != 1 || !reflect.DeepEqual(notified[0], want) {
+		t.Fatalf("OnNewPodIPs got %v, want [%v]", notified, want)
+	}
+
+	local := resolver.LocalPodIPs()
+	if len(local) != 2 || local["10.0.0.1"].Name != "pod1" || local["fd00::1"].Name != "pod1" {
+		t.Fatalf("LocalPodIPs() = %v, want pod1 for both IPs", local)
+	}
+	// The result is a copy
+	delete(local, "10.0.0.1")
+	if _, ok := resolver.LocalPodIPs()["10.0.0.1"]; !ok {
+		t.Fatal("LocalPodIPs() returned the internal map")
+	}
+
+	// No IPs, no notification
+	if err := resolver.RunPodSandbox(ctx, makeNRISandbox("sandbox-2", "ns1", "hostnet", "", nil)); err != nil {
+		t.Fatalf("RunPodSandbox() failed: %v", err)
+	}
+	if len(notified) != 1 {
+		t.Fatalf("OnNewPodIPs called for a sandbox without IPs: %v", notified)
+	}
+
+	if err := resolver.StopPodSandbox(ctx, pod); err != nil {
+		t.Fatalf("StopPodSandbox() failed: %v", err)
+	}
+	if len(resolver.LocalPodIPs()) != 0 {
+		t.Fatalf("LocalPodIPs() = %v after stop, want empty", resolver.LocalPodIPs())
+	}
 }

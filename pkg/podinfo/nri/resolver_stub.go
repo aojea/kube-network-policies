@@ -5,6 +5,7 @@ package nri
 import (
 	"context"
 	"errors"
+	"net/netip"
 
 	"k8s.io/apimachinery/pkg/types"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -14,6 +15,7 @@ import (
 
 var _ podinfo.IPResolver = &NRIResolver{}
 var _ api.PodInfoProvider = &NRIResolver{}
+var _ api.LocalPodIPsProvider = &NRIResolver{}
 
 // NRIResolver is a stub implementation of the NRI-based resolver for non-Linux platforms.
 type NRIResolver struct{}
@@ -32,3 +34,11 @@ func (p *NRIResolver) LookupPod(ip string) (string, types.UID, bool) {
 func (p *NRIResolver) GetPodInfoByIP(ip string) (*api.PodInfo, bool) {
 	return nil, false
 }
+
+// LocalPodIPs always returns nil on non-Linux platforms.
+func (p *NRIResolver) LocalPodIPs() map[string]*api.PodInfo {
+	return nil
+}
+
+// OnNewPodIPs does nothing on non-Linux platforms.
+func (p *NRIResolver) OnNewPodIPs(fn func(ips []netip.Addr)) {}

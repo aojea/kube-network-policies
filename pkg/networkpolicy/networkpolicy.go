@@ -35,6 +35,8 @@ type StandardNetworkPolicy struct {
 
 	// syncCallback is the function to call when the dataplane needs to be re-synced.
 	syncCallback api.SyncFunc
+	// localPodIPs knows the IPs of the local pods before the apiserver does.
+	localPodIPs api.LocalPodIPsProvider
 }
 
 // Ensure StandardNetworkPolicy implements the PolicyEvaluator interface.
@@ -131,6 +133,12 @@ func (s *StandardNetworkPolicy) SetDataplaneSyncCallback(syncFn api.SyncFunc) {
 	}
 }
 
+// SetLocalPodIPs sets the source of the IPs of the local pods as the runtime
+// assigned them, so the pods are managed from the moment their sandbox exists.
+func (s *StandardNetworkPolicy) SetLocalPodIPs(provider api.LocalPodIPsProvider) {
+	s.localPodIPs = provider
+}
+
 // Ready returns true if all required informers have synced.
 func (s *StandardNetworkPolicy) Ready() bool {
 	return s.podsSynced() && s.networkpoliciesSynced() && s.namespacesSynced()
@@ -152,6 +160,19 @@ func (s *StandardNetworkPolicy) ManagedIPs(ctx context.Context) ([]netip.Addr, b
 				if err == nil {
 					managedIPs.Insert(addr)
 				}
+			}
+		}
+	}
+	// The apiserver shows the IPs of a pod after its containers started, the
+	// runtime knows them from the moment the sandbox exists.
+	if s.localPodIPs != nil {
+		for ip, podInfo := range s.localPodIPs.LocalPodIPs() {
+			if len(s.getNetworkPoliciesForPod(podInfo)) == 0 {
+				continue
+			}
+			addr, err := netip.ParseAddr(ip)
+			if err == nil {
+				managedIPs.Insert(addr)
 			}
 		}
 	}

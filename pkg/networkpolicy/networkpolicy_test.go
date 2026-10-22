@@ -10,6 +10,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/logs"
@@ -996,7 +997,31 @@ func TestStandardNetworkPolicy_ManagedIPs(t *testing.T) {
 	if len(ips) != 1 || ips[0] != expectedIP {
 		t.Errorf("expected managed IPs [%v], got %v", expectedIP, ips)
 	}
+
+	// The runtime knows the IPs of the pods whose sandbox exists but the
+	// apiserver does not show yet. Only the pods selected by a policy are
+	// managed, and the IPs the apiserver already shows are not duplicated.
+	evaluator.SetLocalPodIPs(fakeLocalPodIPs{
+		"192.168.2.22": api.NewPodInfo(podLocal, nil, nil, ""),
+		"192.168.2.44": {Name: "pod-starting", Namespace: &api.Namespace{Name: "bar"}},
+		"fd00::44":     {Name: "pod-starting", Namespace: &api.Namespace{Name: "bar"}},
+		"192.168.2.55": {Name: "pod-other-ns", Namespace: &api.Namespace{Name: "other"}},
+	})
+	ips, _, err = evaluator.ManagedIPs(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := sets.New(expectedIP, netip.MustParseAddr("192.168.2.44"), netip.MustParseAddr("fd00::44"))
+	if got := sets.New(ips...); !got.Equal(expected) {
+		t.Errorf("expected managed IPs %v, got %v", expected.UnsortedList(), got.UnsortedList())
+	}
 }
+
+// fakeLocalPodIPs is what the runtime knows: IP to pod.
+type fakeLocalPodIPs map[string]*api.PodInfo
+
+func (f fakeLocalPodIPs) LocalPodIPs() map[string]*api.PodInfo  { return f }
+func (f fakeLocalPodIPs) OnNewPodIPs(fn func(ips []netip.Addr)) {}
 
 func TestStandardNetworkPolicy_GetLocalPodsForNetworkPolicy(t *testing.T) {
 	podLocal := makePod("pod-local", "bar", "192.168.2.22")

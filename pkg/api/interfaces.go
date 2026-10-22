@@ -22,6 +22,18 @@ type DomainResolver interface {
 // a dataplane reconciliation.
 type SyncFunc func()
 
+// LocalPodIPsProvider exposes the IPs of the pods on the node as the container
+// runtime assigns them. The runtime assigns them when it creates the sandbox,
+// before the containers start and before the apiserver shows them.
+type LocalPodIPsProvider interface {
+	// LocalPodIPs returns the IPs of the pods on the node with the pod that
+	// owns each one.
+	LocalPodIPs() map[string]*PodInfo
+	// OnNewPodIPs registers a function called with the IPs of a new pod before
+	// its containers start. The function must be fast, the runtime waits for it.
+	OnNewPodIPs(fn func(ips []netip.Addr))
+}
+
 // Verdict represents the outcome of a packet evaluation.
 type Verdict int
 

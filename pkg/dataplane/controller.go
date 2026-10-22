@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/kube-network-policies/pkg/api"
 	"sigs.k8s.io/kube-network-policies/pkg/network"
 	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
 	"sigs.k8s.io/kube-network-policies/pkg/runner"
@@ -61,6 +62,9 @@ type Config struct {
 	StrictMode          bool   // enforce network policies also on established connections
 	CTLabelAccept       int    // conntrack label to set on accepted connections (between 1-127)
 	skipSkuidBypass     bool   // skip the "meta skuid 0 accept" rule, used for testing to force all traffic through nfqueue
+	// LocalPodIPs, if set, tells the IPs of a new pod before its containers
+	// start, so they are added to the sets before the first packet.
+	LocalPodIPs api.LocalPodIPsProvider
 }
 
 func (c *Config) Defaults() error {
@@ -154,6 +158,18 @@ func newController(
 		}
 	}
 	c.policyEngine.SetDataplaneSyncCallbacks(syncCallback)
+
+	// A new pod is not in the apiserver view until its containers started,
+	// so its IPs are added to the sets as soon as the runtime assigns them.
+	// The sync that follows removes them if no policy manages the pod.
+	if c.config.LocalPodIPs != nil {
+		c.config.LocalPodIPs.OnNewPodIPs(func(ips []netip.Addr) {
+			if err := c.addPodIPs(ips); err != nil {
+				klog.V(2).InfoS("adding the IPs of a new pod to the sets", "ips", ips, "error", err)
+			}
+			syncCallback()
+		})
+	}
 
 	return c, nil
 }
@@ -512,6 +528,28 @@ func replaceSet(nft *nftables.Conn, set *nftables.Set, elements []nftables.SetEl
 		}
 	}
 	return nil
+}
+
+// addPodIPs adds the IPs to the sets of managed pods in one transaction.
+func (c *Controller) addPodIPs(ips []netip.Addr) error {
+	nft, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("can not start nftables:%v", err)
+	}
+	table := &nftables.Table{
+		Name:   c.config.NFTableName,
+		Family: nftables.TableFamilyINet,
+	}
+	for _, ip := range ips {
+		set := &nftables.Set{Table: table, Name: podV4IPsSet, KeyType: nftables.TypeIPAddr}
+		if ip.Is6() {
+			set = &nftables.Set{Table: table, Name: podV6IPsSet, KeyType: nftables.TypeIP6Addr}
+		}
+		if err := nft.SetAddElements(set, []nftables.SetElement{{Key: ip.AsSlice()}}); err != nil {
+			return fmt.Errorf("failed to add %s to Set %s : %v", ip, set.Name, err)
+		}
+	}
+	return nft.Flush()
 }
 
 // writeNFTablesRules sends the whole ruleset in one transaction. With recreate

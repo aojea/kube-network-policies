@@ -5,6 +5,8 @@ package nri
 import (
 	"context"
 	"fmt"
+	"maps"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 
 var _ podinfo.IPResolver = &NRIResolver{}
 var _ api.PodInfoProvider = &NRIResolver{}
+var _ api.LocalPodIPsProvider = &NRIResolver{}
 var _ stub.StopPodInterface = &NRIResolver{}
 
 // NRIResolver is a standalone component that listens to NRI events
@@ -39,6 +42,7 @@ type NRIResolver struct {
 	mu               sync.Mutex
 	podInfoByIP      map[string]*api.PodInfo
 	podInfoBySandbox map[string]*api.PodInfo
+	onNewPodIPs      func(ips []netip.Addr)
 }
 
 // NewNRIResolver creates a new resolver that looks up pods via the NRI plugin.
@@ -123,6 +127,20 @@ func (p *NRIResolver) GetPodInfoByIP(ip string) (*api.PodInfo, bool) {
 	return podInfo, found
 }
 
+// LocalPodIPs implements the api.LocalPodIPsProvider interface.
+func (p *NRIResolver) LocalPodIPs() map[string]*api.PodInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.podInfoByIP)
+}
+
+// OnNewPodIPs implements the api.LocalPodIPsProvider interface.
+func (p *NRIResolver) OnNewPodIPs(fn func(ips []netip.Addr)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onNewPodIPs = fn
+}
+
 // Synchronize rebuilds the state from the runtime snapshot. The runtime
 // does not deliver sandbox events while a plugin synchronizes.
 func (p *NRIResolver) Synchronize(_ context.Context, pods []*nriapi.PodSandbox, containers []*nriapi.Container) ([]*nriapi.ContainerUpdate, error) {
@@ -180,7 +198,6 @@ func (p *NRIResolver) RunPodSandbox(_ context.Context, pod *nriapi.PodSandbox) e
 	podInfo := p.getPodInfo(pod)
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	// A sandbox runs once, but if the runtime reports it again the IPs of
 	// the first run must not outlive it, every IP entry has to point to the
 	// PodInfo in podInfoBySandbox or it is never released.
@@ -188,6 +205,18 @@ func (p *NRIResolver) RunPodSandbox(_ context.Context, pod *nriapi.PodSandbox) e
 	p.podInfoBySandbox[pod.GetId()] = podInfo
 	for _, ip := range ips {
 		p.podInfoByIP[ip] = podInfo
+	}
+	fn := p.onNewPodIPs
+	p.mu.Unlock()
+
+	if fn != nil && len(ips) > 0 {
+		addrs := make([]netip.Addr, 0, len(ips))
+		for _, ip := range ips {
+			if addr, err := netip.ParseAddr(ip); err == nil {
+				addrs = append(addrs, addr)
+			}
+		}
+		fn(addrs)
 	}
 	return nil
 }

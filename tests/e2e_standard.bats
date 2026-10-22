@@ -444,23 +444,10 @@ wait_ipam_released() {
   web6=$(kubectl get pod web -o jsonpath='{.status.podIPs[1].ip}')
   echo "web server at $web4 and $web6"
 
-  # Pod A is selected by a policy that allows everything, so its IPs stay in
-  # the dataplane set after it finishes. Pod B is denied all egress.
+  # Pod A is not selected by any policy, so nothing keeps its IPs in the
+  # dataplane set after it finishes. Pod B is denied all egress, and its IPs
+  # must be in the set before its first packet.
   kubectl apply -f - <<EOP
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-pod-a
-  namespace: dev
-spec:
-  podSelector:
-    matchLabels:
-      app: pod-a
-  policyTypes:
-  - Egress
-  egress:
-  - {}
----
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -517,7 +504,7 @@ EOP
   echo "connect to webserver should work: $output"
   test "$output" = "ok"
 
-  kubectl -n dev delete networkpolicy allow-pod-a deny-pod-b
+  kubectl -n dev delete networkpolicy deny-pod-b
 }
 
 # The fix for issue 414 relies on the runtime: NRI releases the IPs when the

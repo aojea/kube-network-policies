@@ -146,12 +146,16 @@ func run() int {
 	// It decides which local Pod owns an IP, the apiserver view of the IPs is late and
 	// outlives the Pod, so it is passed apart from the other resolvers.
 	var localResolver podinfo.LocalResolver
+	var nriIPResolver *nri.NRIResolver
 	if !opts.DisableNRI {
-		nriIPResolver, err := nri.NewNRIResolver(ctx, nodeName, nsInformer)
+		nriIPResolver, err = nri.NewNRIResolver(ctx, nodeName, nsInformer)
 		if err != nil {
 			klog.Infof("failed to create NRI plugin, using apiserver information only: %v", err)
 		} else {
 			localResolver = nriIPResolver
+			// The runtime assigns the IPs before the apiserver shows them, so the
+			// new pods are managed by the dataplane from their first packet.
+			dpCfg.LocalPodIPs = nriIPResolver
 		}
 	}
 
@@ -194,12 +198,16 @@ func run() int {
 	))
 
 	// Standard Network Policy goes after AdminNetworkPolicy and before BaselineAdminNetworkPolicy
-	evaluators = append(evaluators, networkpolicy.NewStandardNetworkPolicy(
+	standardNetworkPolicy := networkpolicy.NewStandardNetworkPolicy(
 		nodeName,
 		nsInformer,
 		podInformer,
 		networkPolicyInfomer,
-	))
+	)
+	if nriIPResolver != nil {
+		standardNetworkPolicy.SetLocalPodIPs(nriIPResolver)
+	}
+	evaluators = append(evaluators, standardNetworkPolicy)
 
 	evaluators = append(evaluators, pluginsnpav1alpha1.NewBaselineAdminNetworkPolicy(
 		banpInformer,
